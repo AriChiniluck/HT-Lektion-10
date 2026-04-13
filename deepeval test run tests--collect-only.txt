@@ -1,0 +1,24 @@
+deepeval test run tests/ --collect-only
+tests/test_critic.py::test_critic_approves_high_quality_findings
+tests/test_critic.py::test_critic_revises_weak_findings
+tests/test_critic.py::test_critic_verdict_consistency
+tests/test_critic.py::test_critic_respects_plan_coverage
+tests/test_e2e.py::test_e2e_happy_path[happy_0]
+tests/test_e2e.py::test_e2e_happy_path[happy_1]
+tests/test_e2e.py::test_e2e_happy_path[happy_2]
+tests/test_e2e.py::test_e2e_failure_cases_graceful[failure_0]
+tests/test_e2e.py::test_e2e_failure_cases_graceful[failure_1]
+tests/test_e2e.py::test_e2e_full_golden_dataset
+tests/test_planner.py::test_planner_plan_quality[Compare naive RAG vs sentence-window retrieval]
+tests/test_planner.py::test_planner_plan_quality[What are the best practices for multi-agent systems in 2026?]
+tests/test_planner.py::test_planner_plan_quality[Explain how LangGraph orchestrates agent workflows]
+tests/test_planner.py::test_planner_calls_knowledge_search
+tests/test_planner.py::test_planner_preserves_user_language
+tests/test_researcher.py::test_researcher_groundedness_rag_topic
+tests/test_researcher.py::test_researcher_relevancy_multi_agent
+tests/test_researcher.py::test_researcher_handles_empty_plan_gracefully
+tests/test_researcher.py::test_researcher_groundedness_langgraph
+tests/test_tools.py::test_tool_correctness_planner_uses_knowledge_search
+tests/test_tools.py::test_tool_correctness_researcher_uses_search_tools
+tests/test_tools.py::test_tool_correctness_supervisor_calls_save_report
+Running teardown with pytest sessionfinish...
