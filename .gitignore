@@ -14,9 +14,6 @@ venv/
 # FAISS index & knowledge chunks (rebuilt by ingest.py)
 index/
 
-# Generated output reports
-output/
-
 # IDEs
 .vscode/
 .idea/
