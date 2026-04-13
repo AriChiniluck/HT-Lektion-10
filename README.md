@@ -516,3 +516,4 @@ eval_model=gpt-4o-mini
 | `assert 'save_report' in all_names` | Запит надто простий — Supervisor відповів без інструментів | Використовувати складний багаточастинний запит |
 | `AttributeError: ... has no attribute 'name'` | deepeval v3.9+ змінив API | Використовувати `getattr(metric, 'name', type(metric).__name__)` |
 | Тест зависає на довго (>10 хв) | Ланцюжок агентів залучає багато веб-пошуків | Нормально для e2e, встановіть терпіння 😊 |
+
