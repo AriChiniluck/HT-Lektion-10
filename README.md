@@ -409,51 +409,49 @@ def test_e2e_full_golden_dataset():
 
 ### Моделі виконання (Execution) — агенти
 
-Всі агенти використовують `settings.model_name` з файлу `.env`:
+Кожен агент має **власну** модель, яку можна задати окремо у `.env`:
 
-| Агент | Використовує |
-|---|---|
-| Planner | `settings.model_name` (наприклад, `gpt-5.1`) |
-| Researcher | те саме |
-| Critic | те саме |
-| Supervisor | те саме |
+| Агент | Поле у `.env` | За замовчуванням |
+|---|---|---|
+| Supervisor | `supervisor_model` | `gpt-4o` |
+| Researcher | `researcher_model` | `gpt-4o` |
+| Planner | `planner_model` | `gpt-4o-mini` |
+| Critic | `critic_model` | `gpt-4o-mini` |
+
+Fallback для всіх: `model_name=gpt-4o` — використовується, якщо окреме поле не задано.
 
 Ці виклики **коштують найбільше** — агенти використовують багато токенів для планування, пошуку та синтезу.
 
 ### Модель оцінювання (Evaluation) — DeepEval GEval
 
-За замовчуванням: та сама `settings.model_name`. Але це **надмірно**.
+Задається **окремо** від агентів через поле `eval_model` у `.env`:
 
 ```python
 # У кожному тестовому файлі:
-EVAL_MODEL = os.getenv("DEEPEVAL_MODEL", settings.model_name)
+EVAL_MODEL = os.getenv("DEEPEVAL_MODEL", settings.eval_model)
 ```
 
-**GEval лише порівнює тексти** — він не пише звіти і не шукає інформацію. Для цього достатньо меншої моделі.
+За замовчуванням: `gpt-4o-mini` — достатньо для судді, який лише порівнює тексти.
 
-### Рекомендація: розділити моделі
+**GEval не пише звіти і не шукає інформацію** — менша модель справляється так само добре.
 
+### Підсумок: розподіл моделей
+
+| Роль | Модель | Причина |
+|---|---|---|
+| Supervisor, Researcher | `gpt-4o` | Складний аналіз, синтез |
+| Planner, Critic | `gpt-4o-mini` | Структурований вивід, дешевше |
+| DeepEval суддя | `gpt-4o-mini` | Тільки порівняння текстів |
+
+**Перевизначити модель судді** без зміни коду:
 ```bash
-# Виконання: gpt-5.1 (потужна, для якісних звітів)
-# Оцінювання: gpt-4o-mini (швидша, дешевша, достатня для judge)
-
-DEEPEVAL_MODEL=gpt-4o-mini deepeval test run tests/
-# або
-set DEEPEVAL_MODEL=gpt-4o-mini
+# PowerShell
+$env:DEEPEVAL_MODEL = "gpt-4o"
 deepeval test run tests/
-```
 
-**Переваги:**
-- Економія ~60–80% на вартості тестування
-- Швидший запуск тестів (mini-моделі швидше відповідають)
-- Якість оцінки практично не падає — GEval добре працює з меншими моделями
-
-**Де змінити:**
-Додайте у `.env`:
+# або у .env
+eval_model=gpt-4o-mini
 ```
-DEEPEVAL_MODEL=gpt-4o-mini
-```
-або використовуйте окремо для тестування, щоб не впливати на основний агент.
 
 ---
 
