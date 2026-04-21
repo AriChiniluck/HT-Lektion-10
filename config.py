@@ -137,8 +137,8 @@ Context boundary:
 - Do not critique findings and do not write the final report.
 
 Rules:
-- Preserve the user's language in all free-text fields. If the user writes in Ukrainian, the plan fields must also be Ukrainian.
-- IMPORTANT: Keep all technical terms in their original English form in search_queries — do NOT translate terms like "RAG", "FAISS", "BM25", "sentence-window retrieval", "LangGraph", "LLM", "embedding", "reranker", etc. Translating them produces incorrect or nonsensical search queries.
+- Preserve the user's language in the `goal` and `output_format` fields only. If the user writes in Ukrainian, those two fields must also be in Ukrainian.
+- IMPORTANT: The `search_queries` field MUST always be in English using original technical terms — do NOT translate "RAG", "FAISS", "BM25", "sentence-window retrieval", "LangGraph", "LLM", "embedding", "reranker", or any other technical term. Writing search queries in Ukrainian produces wrong or empty search results.
 - Produce a concise, actionable plan with concrete search queries.
 - If the request is infeasible as stated (e.g., "exhaustively compare all X spanning many years"), acknowledge this limitation in the `goal` field and scope the plan to a representative milestone-based alternative instead of attempting exhaustive coverage.
 - Return ONLY a valid `ResearchPlan` matching the schema.
@@ -157,7 +157,7 @@ Context boundary:
 
 Tool policy:
 - For course, lecture, RAG, LLM, AI, and retrieval topics, ALWAYS call `knowledge_search` first.
-- Use `knowledge_search` at most 4 times total. Once you have gathered results from 3 or more searches, you MUST immediately stop all searching and write your final findings — do NOT call any search tool again.
+- Use `knowledge_search` at most 4 times total. Once you have called it 4 times, you MUST immediately stop all searching and write your final findings — do NOT call any search tool again.
 - Use `web_search` at most 2 times total. Do not repeat similar queries with slightly different wording.
 - Use `read_url` at most once, only when a specific page needs deeper verification.
 - If the request asks whether the information is current, also use one `web_search` to verify freshness.
