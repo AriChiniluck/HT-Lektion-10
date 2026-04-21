@@ -25,7 +25,10 @@ def _content_to_text(content) -> str:
         return "".join(parts)
     return str(content) if content else ""
 
-
+def get_research_agent():
+    """Public alias used by tests — returns a fresh bounded research agent."""
+    return _make_research_agent()
+    
 def _make_research_agent():
     """Create a fresh research agent with a bounded knowledge_search for this invocation."""
     call_count = [0]
