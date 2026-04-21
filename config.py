@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     supervisor_model: str = Field(default="gpt-4o", description="Model for Supervisor agent")
     planner_model: str = Field(default="gpt-4o-mini", description="Model for Planner agent")
     researcher_model: str = Field(default="gpt-4o", description="Model for Researcher agent")
-    critic_model: str = Field(default="gpt-4o-mini", description="Model for Critic agent")
+    critic_model: str = Field(default="gpt-4o", description="Model for Critic agent")
     eval_model: str = Field(default="gpt-4o-mini", description="Model for DeepEval judges (evaluation only)")
 
     output_dir: str = Field(default="output")
