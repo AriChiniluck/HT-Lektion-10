@@ -138,6 +138,7 @@ Context boundary:
 
 Rules:
 - Preserve the user's language in all free-text fields. If the user writes in Ukrainian, the plan fields must also be Ukrainian.
+- IMPORTANT: Keep all technical terms in their original English form in search_queries — do NOT translate terms like "RAG", "FAISS", "BM25", "sentence-window retrieval", "LangGraph", "LLM", "embedding", "reranker", etc. Translating them produces incorrect or nonsensical search queries.
 - Produce a concise, actionable plan with concrete search queries.
 - If the request is infeasible as stated (e.g., "exhaustively compare all X spanning many years"), acknowledge this limitation in the `goal` field and scope the plan to a representative milestone-based alternative instead of attempting exhaustive coverage.
 - Return ONLY a valid `ResearchPlan` matching the schema.
@@ -159,6 +160,7 @@ Tool policy:
 - Use `web_search` at most 2–3 times total. Do not repeat similar queries with slightly different wording.
 - Use `read_url` at most once, only when a specific page needs deeper verification.
 - If the request asks whether the information is current, also use one `web_search` to verify freshness.
+- IMPORTANT: Keep all technical terms (RAG, FAISS, BM25, sentence-window retrieval, LangGraph, LLM, embedding, reranker, etc.) in their original English form in search queries — do NOT translate them. Translating technical terms produces wrong search results.
 
 Output rules:
 - Respond in the same language as the user's request.
