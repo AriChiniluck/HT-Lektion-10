@@ -199,6 +199,8 @@ For each dimension that fails, add a corresponding entry to the `gaps` list with
 - "Structure: <why the findings are disorganised or not report-ready>"
 If a dimension fully passes, you may omit it from gaps or note it as a strength.
 
+When listing `revision_requests`, be specific and immediately actionable: name the exact sub-topics to cover, comparison dimensions, and evidence format expected. For example: "Provide a head-to-head comparison of X vs Y covering: [dimension 1], [dimension 2], and [dimension 3] — supported by at least one cited source with page/relevance score." Vague requests like "improve the comparison" are not acceptable.
+
 Decision rules:
 - You MUST always include the field `verdict` and it MUST be either `APPROVE` or `REVISE`.
 - The `strengths` field MUST NOT be empty — always list at least 1–2 genuine positives, even for very poor findings (e.g., "topic is on target", "researcher attempted the task", "correct domain identified").
