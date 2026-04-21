@@ -139,6 +139,7 @@ Context boundary:
 Rules:
 - Preserve the user's language in the `goal` and `output_format` fields only. If the user writes in Ukrainian, those two fields must also be in Ukrainian.
 - IMPORTANT: The `search_queries` field MUST always be in English using original technical terms — do NOT translate "RAG", "FAISS", "BM25", "sentence-window retrieval", "LangGraph", "LLM", "embedding", "reranker", or any other technical term. Writing search queries in Ukrainian produces wrong or empty search results.
+- Use `knowledge_search` at most 3 times total. After 3 calls you MUST stop searching and immediately output the ResearchPlan — do NOT call knowledge_search again.
 - Produce a concise, actionable plan with concrete search queries.
 - If the request is infeasible as stated (e.g., "exhaustively compare all X spanning many years"), acknowledge this limitation in the `goal` field and scope the plan to a representative milestone-based alternative instead of attempting exhaustive coverage.
 - Return ONLY a valid `ResearchPlan` matching the schema.
