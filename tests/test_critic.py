@@ -69,26 +69,33 @@ verdict_consistency = GEval(
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 GOOD_FINDINGS = """
-# RAG Approaches: Naive vs Advanced vs Agentic
+# Naive RAG vs Sentence-Window Retrieval
 
 ## Naive RAG
-Fixed-size chunk splitting (400–800 tokens). Fast and simple but loses cross-sentence context.
+Fixed-size chunk splitting (400–800 tokens). Fast and simple, but loses cross-sentence context
+because a sentence may be split across two chunks.
+**When to prefer**: quick prototypes, single-sentence fact retrieval, latency-sensitive pipelines
+where indexing speed matters more than nuanced context.
 Source: lecture_rag_basics.pdf / page 3 / Relevance: 0.91
 
-## Advanced RAG
-Sentence-window retrieval expands each matched sentence with surrounding context (±3 sentences).
-Parent-child chunking allows fine-grained matching with coarser retrieval for context.
+## Sentence-Window Retrieval
+Matches individual sentences but retrieves a surrounding context window (±3 sentences) to preserve
+cross-sentence meaning. Parent-child chunking combines fine-grained matching with coarser retrieval.
+**When to prefer**: complex multi-hop questions, long-form technical QA, or any domain where a
+single sentence is meaningless without its surrounding paragraph.
 Source: rag_advanced_2024.pdf / page 7 / Relevance: 0.88
 
-## Agentic RAG
-Uses an orchestrating agent that decides whether to re-retrieve or refine the query.
-Applied in production systems as of 2025–2026.
-Source: agentic_rag_survey_2026.pdf / page 12 / Relevance: 0.85
+## Summary Comparison
+| Aspect          | Naive RAG                        | Sentence-Window                    |
+|-----------------|----------------------------------|------------------------------------|
+| Chunking        | Fixed tokens                     | Sentence-level + context expansion |
+| Speed           | Faster (simpler index)           | Slightly slower                    |
+| Context quality | Lower (context may be split)     | Higher (surrounding sentences kept)|
+| Best for        | Simple, direct queries           | Complex, multi-hop queries         |
 
 ## Sources
-- lecture_rag_basics.pdf
-- rag_advanced_2024.pdf
-- agentic_rag_survey_2026.pdf
+- lecture_rag_basics.pdf (page 3)
+- rag_advanced_2024.pdf (page 7)
 """
 
 WEAK_FINDINGS = """
@@ -241,3 +248,4 @@ def test_critic_respects_plan_coverage() -> None:
         actual_output=result,
     )
     deepeval.assert_test(test_case, [critique_quality])
+
