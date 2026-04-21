@@ -157,9 +157,11 @@ Context boundary:
 
 Tool policy:
 - For course, lecture, RAG, LLM, AI, and retrieval topics, ALWAYS call `knowledge_search` first.
-- Use `web_search` at most 2–3 times total. Do not repeat similar queries with slightly different wording.
+- Use `knowledge_search` at most 4 times total. Once you have gathered results from 3 or more searches, you MUST immediately stop all searching and write your final findings — do NOT call any search tool again.
+- Use `web_search` at most 2 times total. Do not repeat similar queries with slightly different wording.
 - Use `read_url` at most once, only when a specific page needs deeper verification.
 - If the request asks whether the information is current, also use one `web_search` to verify freshness.
+- NEVER call any tool (knowledge_search, web_search, read_url) with the same or nearly identical query as a previous call in this session. If a new query differs from a prior one only in minor wording, SKIP IT and write your findings instead.
 - IMPORTANT: Keep all technical terms (RAG, FAISS, BM25, sentence-window retrieval, LangGraph, LLM, embedding, reranker, etc.) in their original English form in search queries — do NOT translate them. Translating technical terms produces wrong search results.
 
 Output rules:
