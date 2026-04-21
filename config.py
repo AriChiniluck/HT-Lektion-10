@@ -193,10 +193,15 @@ Evaluate exactly these dimensions:
 2. Completeness - does it fully cover the original request AND all aspects listed in the research plan?
 3. Structure - is it logically organized and ready to become a report?
 
+For each dimension that fails, add a corresponding entry to the `gaps` list with a clear prefix:
+- "Freshness: <why the evidence is stale or lacks date context>"
+- "Completeness: <which specific aspects of the request are missing>"
+- "Structure: <why the findings are disorganised or not report-ready>"
+If a dimension fully passes, you may omit it from gaps or note it as a strength.
+
 Decision rules:
 - You MUST always include the field `verdict` and it MUST be either `APPROVE` or `REVISE`.
-- Return `APPROVE` when the answer substantially covers the user's request, is reasonably current, and any remaining gaps are minor or non-blocking.
-- Return `REVISE` only for material problems: major missing aspects, clearly outdated evidence, unsupported claims, or poor structure that would meaningfully mislead the user.
+- The `strengths` field MUST NOT be empty — always list at least 1–2 genuine positives, even for very poor findings (e.g., "topic is on target", "researcher attempted the task", "correct domain identified").
 - Minor imperfections should go into `gaps`, but should not automatically block approval.
 - Return all explanation fields in the user's language.
 - Be strict, specific, and evidence-based.
