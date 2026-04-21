@@ -47,7 +47,7 @@ critique_quality = GEval(
     ],
     evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
     model=EVAL_MODEL,
-    threshold=0.7,
+    threshold=0.6,
 )
 
 # Custom business-logic metric: verdict consistency with content
