@@ -23,7 +23,10 @@ def plan(request: str) -> str:
     """Create a structured research plan for the user's request."""
     planner_request = (
         f"{request}\n\n"
-        "Important: keep all ResearchPlan text fields in the same language as the user's request."
+        "Important: keep the `goal` and `output_format` fields in the same language as the user's request. "
+        "However, the `search_queries` field MUST always use the original English technical terms — "
+        "do NOT translate 'RAG', 'sentence-window retrieval', 'FAISS', 'BM25', 'LangGraph', 'LLM', "
+        "'embedding', 'reranker', or any other technical term. Write search queries in English only."
     )
     result = get_planner_agent().invoke(
         {"messages": [{"role": "user", "content": planner_request}]}
