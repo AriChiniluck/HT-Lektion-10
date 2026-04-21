@@ -76,7 +76,7 @@ class HybridRetriever:
                     "source": md.get("source", "unknown"),
                     "filename": md.get("filename", "unknown"),
                     "page": md.get("page", "?"),
-                    "semantic_score": float(score),
+                    "semantic_distance": float(score),  # FAISS L2 distance — lower = more similar
                     "semantic_rank": rank,
                 }
             )
