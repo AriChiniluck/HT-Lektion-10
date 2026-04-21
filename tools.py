@@ -42,8 +42,10 @@ def preview_text(value: str, limit: int = 160) -> str:
 AUTO_SAVE_NOTE_MARKERS = (
     "best-effort draft",
     "maximum revision limit",
-    "ліміт ревіз",
+    "revision limit",
+    "ліміт",       # matches both ліміт (nominative) and ліміту (genitive)
     "максимальн",
+    "збережено після",  # e.g. збережено після досягнення
 )
 
 
