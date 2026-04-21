@@ -172,14 +172,14 @@ class RevisionLimitMiddleware(AgentMiddleware):
         # This prevents the LLM from seeing the final REVISE signal and outputting plain text
         # instead of calling save_report. Mirrors the same pre-call injection pattern as force_research.
         if counters.get("limit_reached") and counters.get("awaiting_save"):
-            last_findings = str(counters.get("last_findings") or "").strip()
-            if not last_findings:
-                last_findings = "No research findings were collected before the revision limit was reached."
-            if last_findings:
-                content = _prepend_best_effort_disclaimer(last_findings)
-                filename = _suggest_report_filename(content, default_stem="best_effort_report")
-                counters["awaiting_save"] = False
-                return AIMessage(
+            last_findings = (
+                str(counters.get("last_findings") or "").strip()
+                or "No research findings were collected before the revision limit was reached."
+            )
+            content = _prepend_best_effort_disclaimer(last_findings)
+            filename = _suggest_report_filename(content, default_stem="best_effort_report")
+            counters["awaiting_save"] = False
+            return AIMessage(
                     content="",
                     tool_calls=[
                         {
