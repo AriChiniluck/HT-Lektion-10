@@ -1,11 +1,13 @@
-from functools import lru_cache
 import json
 
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 
 from config import RESEARCH_SYSTEM_PROMPT, build_chat_model, settings
-from tools import web_search, read_url, knowledge_search
+from tools import web_search, read_url, knowledge_search as _knowledge_search
+
+# Hard cap on knowledge_search calls per research() invocation to prevent infinite loops.
+_MAX_KS_CALLS = 4
 
 
 def _content_to_text(content) -> str:
@@ -24,8 +26,22 @@ def _content_to_text(content) -> str:
     return str(content) if content else ""
 
 
-@lru_cache(maxsize=1)
-def get_research_agent():
+def _make_research_agent():
+    """Create a fresh research agent with a bounded knowledge_search for this invocation."""
+    call_count = [0]
+
+    @tool
+    def knowledge_search(query: str) -> str:
+        """Search the local knowledge base for relevant information."""
+        call_count[0] += 1
+        if call_count[0] > _MAX_KS_CALLS:
+            return (
+                f"knowledge_search call limit ({_MAX_KS_CALLS}) reached. "
+                "You MUST stop calling any search tools now and immediately compile "
+                "your findings from the results already gathered."
+            )
+        return _knowledge_search.invoke(query)
+
     return create_agent(
         model=build_chat_model(temperature=0.2, model=settings.researcher_model),
         tools=[web_search, read_url, knowledge_search],
@@ -66,9 +82,9 @@ def research(plan: str) -> str:
         "Important: answer in the same language as the user's request, consult the local knowledge base first for course topics, and keep source metadata in the form 'Source / page / Relevance' when available."
     )
     try:
-        result = get_research_agent().invoke(
+        result = _make_research_agent().invoke(
             {"messages": [{"role": "user", "content": research_request}]},
-            config={"recursion_limit": 17},  # ~8 tool calls max (2 nodes per call + 1 final)
+            config={"recursion_limit": 17},  # ~8 tool calls max; bounded tool is the primary guard
         )
     except Exception as exc:
         return f"Research agent failed: {exc}"
@@ -78,3 +94,4 @@ def research(plan: str) -> str:
         return "Researcher did not return any findings."
 
     return _content_to_text(getattr(messages[-1], "content", ""))
+
