@@ -40,15 +40,17 @@ groundedness = GEval(
         "Claims that align with or reasonably extend content in 'retrieval context' count as grounded.",
         "Claims that directly contradict 'retrieval context' are ungrounded.",
         "Widely accepted ML/AI domain knowledge not contradicted by context may be partially grounded.",
-        "Score = grounded / total claims. This is a hybrid KB+web research system; "
-        "synthesised conclusions drawing from multiple sources can be grounded even without verbatim match.",
+        "IMPORTANT: Do NOT penalise for synthesis or paraphrasing. "
+        "A claim is grounded if its core meaning is supported by any retrieved source, "
+        "even if the exact wording differs.",
+        "Score = grounded_claims / total_claims.",
     ],
     evaluation_params=[
         LLMTestCaseParams.ACTUAL_OUTPUT,
         LLMTestCaseParams.RETRIEVAL_CONTEXT,
     ],
     model=EVAL_MODEL,
-    threshold=0.4,
+    threshold=0.55,
 )
 
 relevancy_metric = GEval(
