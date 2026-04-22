@@ -7,12 +7,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from langfuse import observe, propagate_attributes
 from langgraph.types import Command
 
 from config import settings
+from observability import get_langfuse_client, get_langfuse_handler, infer_support_routing_metadata
 from ingest import ingest
+from user_memory import finish_session, get_or_create_active_user_id, save_message, start_new_session
 from retriever import get_retriever
-from supervisor import supervisor, get_last_critique_payload, reset_awaiting_save, reset_supervisor_limits
+from supervisor import supervisor, get_last_critique_payload, reset_supervisor_limits
 
 try:
     from langchain_community.callbacks import get_openai_callback as _get_oai_cb
@@ -20,7 +23,12 @@ try:
 except Exception:
     _HAS_OAI_CB = False
 
-THREAD_ID = f"hw8-{uuid4().hex[:8]}"
+# One REPL session = one Langfuse session with many traces inside it.
+# The user id is stored locally on the device in a pseudonymous form.
+# We do NOT use IP or MAC addresses because they are unreliable and privacy-sensitive.
+THREAD_ID = f"ht12-{uuid4().hex[:8]}"
+ACTIVE_USER_ID = get_or_create_active_user_id()
+SESSION_ID = start_new_session(ACTIVE_USER_ID)
 
 TOOL_LABELS = {
     "plan": "[Supervisor -> Planner]",
@@ -52,6 +60,14 @@ def console_print(text: str, fallback: str | None = None) -> None:
         encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
         safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
         print(safe)
+
+
+def _show_banner(title: str, width: int = 60, pad_top: bool = True) -> None:
+    line = "=" * width
+    prefix = "\n" if pad_top else ""
+    console_print(f"{prefix}{line}")
+    console_print(title)
+    console_print(line)
 
 
 @contextmanager
@@ -161,9 +177,9 @@ def _show_debug_critic_handoff(critique_payload: dict, next_round: int) -> None:
     revision_requests = critique_payload.get("revision_requests", []) or []
     gaps = critique_payload.get("gaps", []) or []
 
-    console_print(
-        f"  [Supervisor note] Critic verdict: {verdict}; preparing Research round {next_round}",
-        fallback=f"  [Supervisor note] Critic verdict: {verdict}; preparing Research round {next_round}",
+    _show_banner(
+        f"[Supervisor note] Critic verdict: {verdict}; preparing Research round {next_round}",
+        pad_top=False,
     )
 
     if revision_requests:
@@ -195,7 +211,7 @@ def _show_debug_tool_call(tool_name: str, args: dict, research_round: int) -> No
     if tool_name == "research":
         label = f"{label}  (round {research_round})"
 
-    console_print(f"\n{label}")
+    _show_banner(label)
 
     if "request" in args:
         preview = _short_preview(args.get("request", ""), limit=240)
@@ -233,7 +249,7 @@ def _show_debug_tool_call(tool_name: str, args: dict, research_round: int) -> No
 
 def _show_debug_tool_result(tool_name: str, content: str) -> None:
     result_label = TOOL_RESULT_LABELS.get(tool_name, f"[{tool_name} -> Supervisor]")
-    console_print(f"  {result_label}")
+    _show_banner(result_label, pad_top=False)
 
     if tool_name == "plan":
         block = _format_debug_payload("ResearchPlan", content)
@@ -247,7 +263,7 @@ def _show_debug_tool_result(tool_name: str, content: str) -> None:
     console_print(f"  📎 {indented}", fallback=f"  RESULT {indented}")
 
 
-def stream_payload(payload, config) -> list:
+def stream_payload(payload, config, suppress_final_text: bool = False) -> list:
     interrupts = []
     final_messages: list[str] = []
     research_round = 0
@@ -300,7 +316,10 @@ def stream_payload(payload, config) -> list:
             if not content.strip():
                 continue
 
-            if tool_name == "save_report" and content.startswith("Report saved to"):
+            if tool_name == "save_report" and (
+                content.startswith("Report saved to")
+                or content == "Report saved successfully."
+            ):
                 save_report_done = True
 
             if settings.debug:
@@ -310,7 +329,10 @@ def stream_payload(payload, config) -> list:
                 _show_debug_tool_result(tool_name, content)
 
     final_text = "\n".join(msg for msg in final_messages if msg.strip()).strip()
-    if final_text and not interrupts and not save_report_done:
+    if final_text and not suppress_final_text:
+        # Save the assistant reply locally so a returning user can later continue the dialogue.
+        save_message(SESSION_ID, "assistant", final_text)
+    if final_text and not interrupts and not save_report_done and not suppress_final_text:
         console_print(final_text)
 
     return interrupts
@@ -330,11 +352,10 @@ def show_interrupt(interrupt) -> None:
     arguments = request.get("args") or request.get("arguments") or {}
     filename = arguments.get("filename", "report.md")
     content = extract_text(arguments.get("content", ""))
-    preview = content[:1500] + ("\n..." if len(content) > 1500 else "")
+    # Show the full report content so the user can read it before deciding.
+    # No length limit here — the user should see everything before approving.
 
-    console_print("\n" + "=" * 60)
-    console_print("⏸️  ACTION REQUIRES APPROVAL", fallback="ACTION REQUIRES APPROVAL")
-    console_print("=" * 60)
+    _show_banner("⏸️  ACTION REQUIRES APPROVAL")
     console_print(f"  Tool:  {name}")
 
     visible_args = {
@@ -349,8 +370,8 @@ def show_interrupt(interrupt) -> None:
         rendered_args = json.dumps(visible_args, ensure_ascii=False)
         console_print(f"  Args:  {rendered_args}")
     else:
-        console_print("\nPreview:\n")
-        console_print(preview or "(empty preview)")
+        console_print("\nReport content:\n")
+        console_print(content or "(empty)")
 
     console_print("")
 
@@ -376,13 +397,21 @@ def resolve_interrupts(interrupts, config) -> None:
             payload = Command(resume={"decisions": [{"type": "approve"}]})
 
         elif decision == "edit":
-            user_feedback = input("Feedback > ").strip()
+            user_feedback = (
+                input("Feedback > ").strip()
+                or "Please revise the draft before saving and then call save_report again."
+            )
             int_payload = getattr(current, "value", {}) or {}
             action_requests = int_payload.get("action_requests", [])
             original = action_requests[0] if action_requests else {}
             orig_name = original.get("name", "save_report")
             orig_args = dict(original.get("args") or original.get("arguments") or {})
-            orig_args["feedback"] = user_feedback
+            orig_args["feedback"] = (
+                "Reviewer requested changes before saving. The report was NOT saved. "
+                "Please apply the feedback below, pay attention to the critic's remarks, "
+                "verify the current date if relevant, and then call save_report again.\n\n"
+                f"Reviewer feedback: {user_feedback}"
+            )
             payload = Command(
                 resume={
                     "decisions": [
@@ -403,7 +432,7 @@ def resolve_interrupts(interrupts, config) -> None:
                 or "User rejected saving the report."
             )
             thread_id = (config.get("configurable") or {}).get("thread_id", "")
-            reset_awaiting_save(thread_id)
+            reset_supervisor_limits(thread_id)
             payload = Command(
                 resume={
                     "decisions": [
@@ -416,9 +445,55 @@ def resolve_interrupts(interrupts, config) -> None:
             )
 
         print("\nAgent:")
-        pending = stream_payload(payload, config)
+        pending = stream_payload(payload, config, suppress_final_text=(decision == "reject"))
         if not pending and decision == "approve":
             print("Report saved.")
+        if not pending and decision == "reject":
+            console_print("Save canceled. The report was not saved.")
+
+
+@observe(name="lecture12_user_turn")
+def run_traced_turn(user_input: str, config: dict) -> str | None:
+    """Run one full user turn under a single Langfuse trace.
+
+    This includes the main agent execution and any save-report approval loop.
+    The function returns the current trace id so it is easy to find in Langfuse UI.
+    """
+    langfuse_client = get_langfuse_client()
+
+    save_message(SESSION_ID, "user", user_input)
+    routing_meta = infer_support_routing_metadata(user_input)
+
+    with propagate_attributes(
+        session_id=SESSION_ID,
+        user_id=ACTIVE_USER_ID,
+        tags=["lecture-12", "ht10-base", "multi-agent", settings.langfuse_cloud_region.lower()],
+        metadata={
+            "homework": "lecture-12",
+            "foundation": "HT10",
+            "thread_id": (config.get("configurable") or {}).get("thread_id", ""),
+            "agent_name": "supervisor",
+            "category": str(routing_meta["category"]),
+            "urgency": str(routing_meta["urgency"]),
+            "confidence": f"{routing_meta['confidence']:.2f}",
+            "langfuse_project_name": settings.langfuse_project_name,
+            "langfuse_project_id": settings.langfuse_project_id,
+            "langfuse_org_name": settings.langfuse_org_name,
+            "langfuse_org_id": settings.langfuse_org_id,
+            "langfuse_cloud_region": settings.langfuse_cloud_region,
+            "user_identity_mode": "local_pseudonymous_id",
+        },
+    ):
+        trace_id = langfuse_client.get_current_trace_id()
+        interrupts = stream_payload(
+            {"messages": [{"role": "user", "content": user_input}]},
+            config,
+        )
+        if interrupts:
+            resolve_interrupts(interrupts, config)
+        finish_session(SESSION_ID, topic_summary=user_input, resolution_status="processed", escalated=False)
+        langfuse_client.flush()
+        return trace_id
 
 
 def main() -> None:
@@ -428,9 +503,11 @@ def main() -> None:
     except Exception:
         pass
 
-    print("Multi-Agent Research System (hw8)")
+    print("Multi-Agent Research System (Lecture 12 / HT10 base)")
     print("Debug mode:", "ON" if settings.debug else "OFF")
     print(f"Thread ID: {THREAD_ID}")
+    print(f"Langfuse session: {SESSION_ID}")
+    print(f"Langfuse user: {ACTIVE_USER_ID}")
     print(
         f"Limits: max_revise_cycles={settings.critique_max_rounds}, "
         f"recursion_limit={settings.graph_recursion_limit}, "
@@ -444,9 +521,11 @@ def main() -> None:
     ensure_knowledge_index()
     warmup_rag()
 
+    # We pass the Langfuse callback once here so nested LLM/tool calls are traced.
     config = {
         "configurable": {"thread_id": THREAD_ID},
         "recursion_limit": settings.graph_recursion_limit,
+        "callbacks": [get_langfuse_handler()],
     }
 
     while True:
@@ -482,14 +561,10 @@ def main() -> None:
             print("\nAgent:")
             _t0 = time.monotonic()
             with _open_cb() as _cb:
-                interrupts = stream_payload(
-                    {"messages": [{"role": "user", "content": user_input}]},
-                    config,
-                )
-
-                if interrupts:
-                    resolve_interrupts(interrupts, config)
+                trace_id = run_traced_turn(user_input, config)
             _print_usage(_t0, _cb)
+            if trace_id:
+                console_print(f"Langfuse trace id: {trace_id}")
 
         except KeyboardInterrupt:
             print("\n\nStopped by user.")
@@ -503,7 +578,7 @@ def main() -> None:
                 or "GraphInterrupt" in exc_type
             )
             if is_dangling_tool_calls:
-                new_thread = f"hw8-{uuid4().hex[:8]}"
+                new_thread = f"ht12-{uuid4().hex[:8]}"
                 config["configurable"]["thread_id"] = new_thread
                 reset_supervisor_limits(new_thread)
                 console_print(
