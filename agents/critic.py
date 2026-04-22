@@ -1,28 +1,38 @@
 from functools import lru_cache
+import threading
 
 from langchain.agents import create_agent
 from langchain_core.tools import tool
+from langfuse import observe, propagate_attributes
 
-from config import CRITIC_SYSTEM_PROMPT, build_chat_model, settings
+from config import build_chat_model, get_critic_system_prompt, settings
+from observability import get_langfuse_handler
 from schemas import CritiqueResult
-from tools import knowledge_search
+
+_critic_lock = threading.Lock()
 
 
 @lru_cache(maxsize=1)
-def get_critic_agent():
+def _build_critic_agent():
     return create_agent(
         model=build_chat_model(temperature=0.0, model=settings.critic_model),
-        tools=[knowledge_search],
-        system_prompt=CRITIC_SYSTEM_PROMPT,
+        system_prompt=get_critic_system_prompt(),
         response_format=CritiqueResult,
     )
 
 
+def get_critic_agent():
+    """Return (lazily creating) the shared critic agent. Thread-safe on first initialisation."""
+    with _critic_lock:
+        return _build_critic_agent()
+
+
 @tool
+@observe(name="critic_agent")
 def critique(original_request: str, findings: str, plan: str = "") -> str:
     """Verify findings against the original request and return a structured approve/revise critique."""
     # Limit findings size to avoid unnecessary token spend — critic evaluates quality, not volume.
-    MAX_FINDINGS_LEN = 8000
+    MAX_FINDINGS_LEN = settings.critic_max_findings_len
     findings_text = str(findings or "").strip()
     if len(findings_text) > MAX_FINDINGS_LEN:
         findings_text = findings_text[:MAX_FINDINGS_LEN] + "\n\n[... findings truncated to fit evaluation context ...]"
@@ -33,12 +43,15 @@ def critique(original_request: str, findings: str, plan: str = "") -> str:
     critique_request += (
         "Current research findings:\n"
         f"{findings_text}\n\n"
-        "Important: return all explanation fields in the same language as the user's request/findings."
+        "Important: return all explanation fields in the same language as the user's request/findings. "
+        "If the user asked about a future year or future state beyond today, treat a clearly labeled forecast or scenario analysis based on current evidence as acceptable. Do not require impossible future facts; instead, check whether the answer transparently states uncertainty and uses the latest verified sources available today."
     )
     try:
-        result = get_critic_agent().invoke(
-            {"messages": [{"role": "user", "content": critique_request}]}
-        )
+        with propagate_attributes(metadata={"agent_name": "critic", "stage": "quality_review"}):
+            result = get_critic_agent().invoke(
+                {"messages": [{"role": "user", "content": critique_request}]},
+                config={"callbacks": [get_langfuse_handler()]},
+            )
 
         structured = result.get("structured_response")
         if isinstance(structured, CritiqueResult):
@@ -51,6 +64,7 @@ def critique(original_request: str, findings: str, plan: str = "") -> str:
     except Exception as exc:
         fallback = CritiqueResult(
             verdict="REVISE",
+            is_error=True,
             is_fresh=False,
             is_complete=False,
             is_well_structured=False,
