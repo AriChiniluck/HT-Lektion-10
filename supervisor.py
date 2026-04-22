@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 from collections import defaultdict
 from functools import lru_cache
 from uuid import uuid4
@@ -10,10 +11,11 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from config import SUPERVISOR_SYSTEM_PROMPT, build_chat_model, settings
+from config import build_chat_model, get_supervisor_system_prompt, settings
 from tools import save_report
 from agents import plan, research, critique
 
+import logging
 
 BEST_EFFORT_DISCLAIMER = (
     "> **⚠️ Best-effort draft:** this report was saved after reaching the maximum "
@@ -29,17 +31,81 @@ def _make_counters(original_request: str | None = None) -> dict:
         "force_research": False,
         "last_critique_payload": None,
         "last_findings": None,
+        "last_plan": None,
+        "last_reviewer_feedback": None,
         "original_request": original_request,
     }
 
 
 _RUN_LIMITS: dict[str, dict[str, object]] = defaultdict(_make_counters)
+_DEFAULT_THREAD_ID = "default-thread"
+
+# Per-OS-thread fallback ID when no explicit thread_id is found in the request.
+# Each OS thread gets its own unique ID so parallel requests (each in their own
+# OS thread) never share state via a single "default-thread" key in _RUN_LIMITS.
+_thread_local = threading.local()
+
+# Per-thread-id reentrant locks protect counter read-modify-write operations
+# against race conditions in multi-user (multi-threaded) deployments.
+_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_THREAD_LOCKS_META = threading.Lock()
+
+
+def _get_thread_lock(thread_id: str) -> threading.RLock:
+    """Return (and lazily create) the per-thread-id RLock for safe concurrent counter mutation."""
+    with _THREAD_LOCKS_META:
+        if thread_id not in _THREAD_LOCKS:
+            _THREAD_LOCKS[thread_id] = threading.RLock()
+        return _THREAD_LOCKS[thread_id]
+
+
+def _extract_thread_id_from_mapping(mapping: object) -> str | None:
+    if not isinstance(mapping, dict):
+        return None
+    configurable = mapping.get("configurable") or {}
+    if isinstance(configurable, dict):
+        thread_id = configurable.get("thread_id")
+        if thread_id:
+            return str(thread_id)
+    thread_id = mapping.get("thread_id")
+    if thread_id:
+        return str(thread_id)
+    return None
 
 
 def _get_thread_id(request: ToolCallRequest) -> str:
-    config = getattr(request.runtime, "config", {}) or {}
-    configurable = config.get("configurable", {}) or {}
-    return str(configurable.get("thread_id", "default-thread"))
+    runtime = getattr(request, "runtime", None)
+    candidates = [
+        getattr(request, "config", None),
+        getattr(runtime, "config", None),
+        getattr(runtime, "context", None),
+        getattr(runtime, "state", None),
+    ]
+    for candidate in candidates:
+        thread_id = _extract_thread_id_from_mapping(candidate)
+        if thread_id:
+            return thread_id
+    # No explicit thread_id found — generate a unique per-OS-thread fallback.
+    # This prevents parallel requests (each in a different OS thread) from
+    # merging into the same _RUN_LIMITS entry.
+    # For production multi-user deployments always pass:
+    #   config={'configurable': {'thread_id': <user_or_session_id>}}
+    if not hasattr(_thread_local, "thread_id"):
+        _thread_local.thread_id = f"auto-{uuid4().hex[:8]}"
+        logging.warning(
+            "No thread_id found in request config; assigned per-thread fallback ID %r. "
+            "Pass config={'configurable': {'thread_id': <id>}} for deterministic state.",
+            _thread_local.thread_id,
+        )
+    return _thread_local.thread_id
+
+
+def _mirror_default_thread_state(thread_id: str) -> None:
+    if thread_id == _DEFAULT_THREAD_ID:
+        return
+    counters = _RUN_LIMITS.get(thread_id)
+    if counters is not None:
+        _RUN_LIMITS[_DEFAULT_THREAD_ID] = counters
 
 
 _INVALID_JSON_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -88,6 +154,8 @@ def reset_supervisor_limits(thread_id: str | None = None) -> None:
     if thread_id is None:
         _RUN_LIMITS.clear()
         return
+    if _RUN_LIMITS.get(_DEFAULT_THREAD_ID) is _RUN_LIMITS.get(thread_id):
+        _RUN_LIMITS.pop(_DEFAULT_THREAD_ID, None)
     _RUN_LIMITS.pop(thread_id, None)
 
 
@@ -125,6 +193,7 @@ def _build_research_followup_from_critique(
     gaps = [str(item).strip() for item in (payload.get("gaps") or []) if str(item).strip()]
 
     lines = [f"{prefix}Revise the previous research using the critic's feedback."]
+    lines.append("Important: Do not remove or rewrite already found information unless it is incorrect. Only add new facts, examples, or clarifications required by the Critic. The final answer must include all previously found relevant information, plus the requested additions.")
     if revision_requests:
         lines.append("Address these revision requests:")
         lines.extend(f"- {item}" for item in revision_requests[:8])
@@ -146,6 +215,16 @@ class RevisionLimitMiddleware(AgentMiddleware):
 
     def wrap_model_call(self, request, handler):
         thread_id = _get_thread_id(request)
+        if settings.debug:
+            counters = _RUN_LIMITS.get(thread_id, {})
+            short_state = {
+                'research_calls': counters.get('research_calls'),
+                'revise_cycles': counters.get('revise_cycles'),
+                'awaiting_save': counters.get('awaiting_save'),
+                'limit_reached': counters.get('limit_reached'),
+            }
+            print(f">>>>> thread_id: {thread_id}")
+            print(f">>>>> _RUN_LIMITS[{thread_id}]: {short_state}")
         counters = _RUN_LIMITS[thread_id]
 
         # Inject research BEFORE calling the LLM to avoid wasted token spend
@@ -172,14 +251,14 @@ class RevisionLimitMiddleware(AgentMiddleware):
         # This prevents the LLM from seeing the final REVISE signal and outputting plain text
         # instead of calling save_report. Mirrors the same pre-call injection pattern as force_research.
         if counters.get("limit_reached") and counters.get("awaiting_save"):
-            last_findings = (
-                str(counters.get("last_findings") or "").strip()
-                or "No research findings were collected before the revision limit was reached."
-            )
-            content = _prepend_best_effort_disclaimer(last_findings)
-            filename = _suggest_report_filename(content, default_stem="best_effort_report")
-            counters["awaiting_save"] = False
-            return AIMessage(
+            last_findings = str(counters.get("last_findings") or "").strip()
+            if not last_findings:
+                last_findings = "No research findings were collected before the revision limit was reached."
+            if last_findings:
+                content = _prepend_best_effort_disclaimer(last_findings)
+                filename = _suggest_report_filename(content, default_stem="best_effort_report")
+                counters["awaiting_save"] = False
+                return AIMessage(
                     content="",
                     tool_calls=[
                         {
@@ -218,7 +297,7 @@ class RevisionLimitMiddleware(AgentMiddleware):
             return response
 
         content = _tool_content_to_text(getattr(last_message, "content", "")).strip()
-        if not content or len(content) < 120:
+        if not content or len(content) < settings.auto_save_min_content_len:
             return response
 
         lowered = content.lower()
@@ -249,15 +328,90 @@ class RevisionLimitMiddleware(AgentMiddleware):
             request.runtime, "tool_call_id", "tool-call"
         )
         thread_id = _get_thread_id(request)
+        _mirror_default_thread_state(thread_id)
+        
+        if settings.debug:
+            counters = _RUN_LIMITS.get(thread_id, {})
+            short_state = {
+                'research_calls': counters.get('research_calls'),
+                'revise_cycles': counters.get('revise_cycles'),
+                'awaiting_save': counters.get('awaiting_save'),
+                'limit_reached': counters.get('limit_reached'),
+            }
+            print(f">>>>> TOOL: {tool_name}, thread_id: {thread_id}")
+            print(f">>>>> _RUN_LIMITS[{thread_id}]: {short_state}")
 
         if tool_name == "plan":
-            _RUN_LIMITS[thread_id] = _make_counters(
-                original_request=str((request.tool_call.get("args") or {}).get("request", "") or ""),
-            )
-            return handler(request)
+            incoming_request = str((request.tool_call.get("args") or {}).get("request", "") or "").strip()
+            counters = _RUN_LIMITS.get(thread_id)
+
+            if counters is None:
+                _RUN_LIMITS[thread_id] = _make_counters(original_request=incoming_request or None)
+                _mirror_default_thread_state(thread_id)
+                counters = _RUN_LIMITS[thread_id]
+
+            if incoming_request and not counters.get("original_request"):
+                counters["original_request"] = incoming_request
+
+            # If the supervisor tries to call Planner again after research already started,
+            # keep the existing counters. This avoids wiping the revise-limit state and
+            # prevents repeated critique→plan→research loops.
+            if int(counters.get("research_calls", 0)) > 0:
+                if counters.get("limit_reached") and counters.get("awaiting_save"):
+                    return ToolMessage(
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                        status="error",
+                        content=(
+                            "⛔ Revision limit already reached. Do not call `plan` again. "
+                            "Immediately compose the best-effort draft from the latest findings and call `save_report`."
+                        ),
+                    )
+
+                if counters.get("force_research"):
+                    followup_plan = _build_research_followup_from_critique(
+                        counters.get("last_critique_payload"),
+                        counters.get("last_findings"),
+                        counters.get("original_request"),
+                    )
+                    counters["force_research"] = False
+                    return ToolMessage(
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                        status="success",
+                        content=(
+                            "Skipping redundant mid-run re-planning to avoid a revise loop. "
+                            "Use the critic-guided follow-up below as the next research instruction:\n\n"
+                            f"{followup_plan}"
+                        ),
+                    )
+
+            result = handler(request)
+            plan_text = _tool_content_to_text(getattr(result, "content", "")).strip()
+            if plan_text:
+                counters["last_plan"] = plan_text
+            return result
 
         if tool_name == "research":
             counters = _RUN_LIMITS[thread_id]
+            args = request.tool_call.setdefault("args", {})
+            incoming_plan = str(args.get("plan", "") or "").strip()
+            if int(counters["research_calls"]) == 0:
+                stored_plan = str(counters.get("last_plan", "") or "").strip()
+                if stored_plan and incoming_plan and not incoming_plan.lstrip().startswith("{"):
+                    args["plan"] = stored_plan
+                    incoming_plan = stored_plan
+            if counters.get("limit_reached") and counters.get("awaiting_save"):
+                return ToolMessage(
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                    status="error",
+                    content=(
+                        "⛔ Research is already blocked for this thread because the supervisor is waiting "
+                        "to save or revise the best-effort draft. Do not call `research` again. "
+                        "Immediately compose the best-effort draft from the latest findings and call `save_report`."
+                    ),
+                )
             if (
                 int(counters["research_calls"]) > 0
                 and int(counters["revise_cycles"]) >= settings.critique_max_rounds
@@ -276,27 +430,68 @@ class RevisionLimitMiddleware(AgentMiddleware):
                         "reaching the revision limit, and call `save_report` now."
                     ),
                 )
-            counters["research_calls"] = int(counters["research_calls"]) + 1
-            # Fix 1: store findings so revision rounds can build upon them
+            with _get_thread_lock(thread_id):
+                counters["research_calls"] = int(counters["research_calls"]) + 1
             result = handler(request)
             findings_text = _tool_content_to_text(getattr(result, "content", ""))
             if findings_text.strip():
                 counters["last_findings"] = findings_text
+
+            # If research failed because of recursion or rate limit, stop retry loops early
+            # and force the supervisor to save the best available draft instead of looping.
+            lowered = findings_text.lower()
+            if "research agent failed:" in lowered:
+                counters["limit_reached"] = True
+                counters["awaiting_save"] = True
+                counters["force_research"] = False
+
             return result
 
         if tool_name == "save_report":
-            counters = _RUN_LIMITS[thread_id]
+            counters = _RUN_LIMITS.setdefault(thread_id, _make_counters())
             counters["awaiting_save"] = True
+
+            args = request.tool_call.setdefault("args", {})
+            feedback_text = str(args.get("feedback", "") or "").strip()
             if counters.get("limit_reached"):
-                args = request.tool_call.setdefault("args", {})
                 content = str(args.get("content", ""))
                 args["content"] = _prepend_best_effort_disclaimer(content)
                 if not args.get("filename"):
                     args["filename"] = "best_effort_report.md"
             result = handler(request)
-            # Fix 2: reset awaiting_save when HITL rejects so explanation text isn't mis-saved
-            result_text = _tool_content_to_text(getattr(result, "content", "")).lower()
-            if any(m in result_text for m in ["user rejected", "reviewer requested changes"]):
+            result_text = _tool_content_to_text(getattr(result, "content", ""))
+            lowered = result_text.lower()
+            if "reviewer requested changes" in lowered or "report not saved" in lowered:
+                counters["awaiting_save"] = False
+                # INTENTIONAL: human reviewer authority overrides the automatic revise-cycle
+                # limit. A human can always request more revisions even after the critic’s
+                # automatic limit is reached. This is by design (human > automatic limit).
+                # If you want to hard-cap HITL revisions too, check
+                # counters["revise_cycles"] >= settings.critique_max_rounds here.
+                counters["force_research"] = True
+                counters["last_reviewer_feedback"] = feedback_text or result_text
+                counters["last_critique_payload"] = {
+                    "verdict": "REVISE",
+                    "gaps": [
+                        "The reviewer requested changes, so the previous draft was not approved for saving.",
+                    ],
+                    "revision_requests": [
+                        feedback_text or "Revise the draft according to the review feedback before saving again.",
+                        "Make sure the final answer clearly reflects the review feedback before the next save attempt.",
+                    ],
+                }
+                return result
+            if "report saved to" in lowered:
+                # Remove thread state entirely so the next query starts fresh
+                _RUN_LIMITS.pop(thread_id, None)
+                # Return only a short confirmation, suppressing findings/excerpt after approve
+                return ToolMessage(
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                    status="success",
+                    content="Report saved successfully."
+                )
+            if "user rejected" in lowered:
                 counters["awaiting_save"] = False
             return result
 
@@ -319,9 +514,15 @@ class RevisionLimitMiddleware(AgentMiddleware):
 
             counters["last_critique_payload"] = payload
 
+            # Do not count exception-fallback critiques as a real revise cycle —
+            # transient errors (timeout, rate-limit) should not consume the revision budget.
+            is_critique_error = isinstance(payload, dict) and payload.get("is_error", False)
+
             if verdict == "REVISE":
                 counters["awaiting_save"] = False
-                counters["revise_cycles"] = int(counters["revise_cycles"]) + 1
+                with _get_thread_lock(thread_id):
+                    if not is_critique_error:
+                        counters["revise_cycles"] = int(counters["revise_cycles"]) + 1
                 counters["force_research"] = False
                 if int(counters["revise_cycles"]) >= settings.critique_max_rounds:
                     counters["limit_reached"] = True
@@ -342,7 +543,7 @@ def build_supervisor():
     return create_agent(
         model=build_chat_model(temperature=0.0, model=settings.supervisor_model),
         tools=[plan, research, critique, save_report],
-        system_prompt=SUPERVISOR_SYSTEM_PROMPT,
+        system_prompt=get_supervisor_system_prompt(),
         middleware=[
             RevisionLimitMiddleware(),
             HumanInTheLoopMiddleware(
