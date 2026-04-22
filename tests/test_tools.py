@@ -328,7 +328,7 @@ def test_tool_correctness_researcher_uses_search_tools() -> None:
     agent = get_research_agent()
     result = agent.invoke(
         {"messages": [{"role": "user", "content": plan_text}]},
-        config={"recursion_limit": 15},
+        config={"recursion_limit": settings.graph_recursion_limit},
     )
     messages = result.get("messages", [])
     tools_called = _extract_ai_tool_calls(messages)
