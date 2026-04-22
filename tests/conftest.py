@@ -37,6 +37,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 @pytest.fixture(autouse=True, scope="session")
 def configure_debug(request: pytest.FixtureRequest) -> None:
     """Enable debug output for the whole test session when --agent-debug / DEBUG=1 is set."""
+    os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "YES")
     if request.config.getoption("--agent-debug", default=False) or os.getenv("DEBUG") == "1":
         settings.debug = True
 
