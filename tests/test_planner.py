@@ -105,25 +105,15 @@ def test_planner_plan_quality(user_input: str, eval_model: str) -> None:
     deepeval.assert_test(test_case, [plan_quality])
 
 
-def test_planner_calls_knowledge_search() -> None:
-    """Planner optionally calls `knowledge_search` for course-specific RAG topics.
-
-    The Planner system prompt says 'optionally use knowledge_search' — so we verify:
-      - If the Planner calls any tool, it must ONLY call knowledge_search (no web/save tools).
-      - The resulting plan is always non-empty regardless of KB lookup.
-    """
+def test_planner_does_not_call_retrieval_tools() -> None:
+    """Planner should return a structured plan directly and leave retrieval to the Researcher."""
     request = "Explain naive RAG, sentence-window retrieval, and parent-child chunking as covered in the course materials"
     tool_names = _capture_planner_tool_calls(request)
 
     debug_print(f"[test_planner] Tools used: {tool_names}")
 
-    # Planner must NOT call tools it doesn't have access to
-    forbidden = set(tool_names) - {"knowledge_search"}
-    assert not forbidden, (
-        f"Planner should only have access to 'knowledge_search', but called: {forbidden}"
-    )
+    assert not tool_names, f"Planner should not call retrieval tools, but called: {tool_names}"
 
-    # Regardless of whether KB was consulted, the plan output must be valid
     result = _invoke_planner(request)
     assert result and len(result) > 50, (
         f"Planner returned an empty or too-short plan: {result!r}"
