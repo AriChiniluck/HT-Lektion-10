@@ -43,3 +43,7 @@ class CritiqueResult(BaseModel):
         default_factory=list,
         description="Specific things to fix if verdict is REVISE"
     )
+    is_error: bool = Field(
+        default=False,
+        description="True when the critique step failed due to an exception (not a quality verdict). Supervisor must not count this as a revise cycle."
+    )
