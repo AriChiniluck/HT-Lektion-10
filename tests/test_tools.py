@@ -2,7 +2,7 @@
 test_tools.py — Tool Correctness tests for the multi-agent system.
 
 Verifies that each agent calls the correct tools for a given input:
-  1. Planner receives a research request → must call `knowledge_search`
+    1. Planner receives a research request → must return a plan without doing retrieval itself
   2. Researcher receives a plan → must call at least one search tool
      (knowledge_search, web_search, or read_url)
   3. Supervisor completes a full pipeline → must call `save_report`
@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,14 +33,186 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from config import settings
-from tools import debug_print
+from tools import debug_print, save_report
 from agents.planner import get_planner_agent
 from agents.research import get_research_agent
-from supervisor import supervisor, reset_supervisor_limits
+from supervisor import (
+    RevisionLimitMiddleware,
+    _RUN_LIMITS,
+    reset_supervisor_limits,
+    supervisor,
+)
 
 EVAL_MODEL = os.getenv("DEEPEVAL_MODEL", settings.eval_model)
 
 TOOL_METRIC = ToolCorrectnessMetric(threshold=0.5, model=EVAL_MODEL)
+
+
+def test_revision_state_survives_mid_run_replan() -> None:
+    """A re-plan in the middle of a run must not erase the revise-limit counters."""
+    thread_id = f"test-replan-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 2,
+        "revise_cycles": 2,
+        "limit_reached": True,
+        "awaiting_save": True,
+        "force_research": False,
+        "last_critique_payload": {"verdict": "REVISE"},
+        "last_findings": "Best available findings.",
+        "last_reviewer_feedback": None,
+        "original_request": "Tell me about LangGraph in 2027.",
+    }
+
+    request = SimpleNamespace(
+        tool_call={"name": "plan", "args": {"request": "Revise and continue."}, "id": "plan-1"},
+        tool=SimpleNamespace(name="plan"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    result = middleware.wrap_tool_call(request, lambda req: "ok")
+
+    assert isinstance(result, ToolMessage)
+    assert "save_report" in str(result.content)
+    counters = _RUN_LIMITS[thread_id]
+    assert counters["revise_cycles"] == 2, "Mid-run plan() reset revise_cycles and re-opened the loop."
+    assert counters["limit_reached"] is True
+    assert counters["awaiting_save"] is True
+    assert counters["original_request"] == "Tell me about LangGraph in 2027."
+
+    reset_supervisor_limits(thread_id)
+
+
+def test_save_report_with_feedback_does_not_save() -> None:
+    """Reviewer feedback should block saving and ask for a revision."""
+    result = save_report.invoke(
+        {
+            "filename": "draft.md",
+            "content": "# Draft\n\nInitial content.",
+            "feedback": "Update the answer to reflect 2026 and frame 2027 as a forecast.",
+        }
+    )
+
+    lowered = result.lower()
+    assert "not saved" in lowered
+    assert "revise" in lowered
+
+
+def test_research_is_blocked_after_fail_fast_state() -> None:
+    """If research already failed and the supervisor is awaiting save, more research calls must be blocked."""
+    thread_id = f"test-fail-fast-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 1,
+        "revise_cycles": 0,
+        "limit_reached": True,
+        "awaiting_save": True,
+        "force_research": False,
+        "last_critique_payload": None,
+        "last_findings": "Research agent failed: model_not_found",
+        "last_reviewer_feedback": None,
+        "original_request": "Write a short report about RAG.",
+    }
+
+    request = SimpleNamespace(
+        tool_call={"name": "research", "args": {"plan": "Continue research"}, "id": "research-1"},
+        tool=SimpleNamespace(name="research"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    result = middleware.wrap_tool_call(request, lambda req: "should not run")
+
+    assert isinstance(result, ToolMessage)
+    assert "Do not call `research` again" in str(result.content)
+
+    reset_supervisor_limits(thread_id)
+
+
+def test_tool_calls_mirror_default_thread_state_for_model_phase() -> None:
+    """Tool-phase thread state must be visible to model-phase middleware even if model calls resolve to default-thread."""
+    thread_id = f"test-default-thread-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+
+    plan_request = SimpleNamespace(
+        tool_call={"name": "plan", "args": {"request": "Summarize RAG"}, "id": "plan-1"},
+        tool=SimpleNamespace(name="plan"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    middleware.wrap_tool_call(plan_request, lambda req: ToolMessage(tool_call_id="plan-1", name="plan", content="ok"))
+
+    assert _RUN_LIMITS.get("default-thread") is _RUN_LIMITS.get(thread_id)
+
+    reset_supervisor_limits(thread_id)
+
+
+def test_first_research_call_uses_stored_structured_plan() -> None:
+    """If Supervisor passes only a short goal, middleware should restore the full Planner output on the first research call."""
+    thread_id = f"test-stored-plan-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+    full_plan = '{"goal": "Compare RAG types", "search_queries": ["naive rag", "agentic rag"], "sources_to_check": ["knowledge_base", "web"], "output_format": "report"}'
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 0,
+        "revise_cycles": 0,
+        "limit_reached": False,
+        "awaiting_save": False,
+        "force_research": False,
+        "last_critique_payload": None,
+        "last_findings": None,
+        "last_plan": full_plan,
+        "last_reviewer_feedback": None,
+        "original_request": "Compare RAG types.",
+    }
+
+    request = SimpleNamespace(
+        tool_call={"name": "research", "args": {"plan": "Compare RAG types"}, "id": "research-1"},
+        tool=SimpleNamespace(name="research"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    captured = {}
+
+    def _handler(req):
+        captured["plan"] = req.tool_call["args"]["plan"]
+        return ToolMessage(tool_call_id="research-1", name="research", content="ok")
+
+    middleware.wrap_tool_call(request, _handler)
+
+    assert captured["plan"] == full_plan
+
+    reset_supervisor_limits(thread_id)
+
+
+def test_successful_save_resets_thread_state() -> None:
+    """A successful save_report should clear per-thread supervisor state so the next query starts fresh."""
+    thread_id = f"test-save-reset-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 2,
+        "revise_cycles": 2,
+        "limit_reached": True,
+        "awaiting_save": True,
+        "force_research": False,
+        "last_critique_payload": {"verdict": "REVISE"},
+        "last_findings": "Best effort draft",
+        "last_plan": None,
+        "last_reviewer_feedback": None,
+        "original_request": "Compare RAG types.",
+    }
+
+    request = SimpleNamespace(
+        tool_call={"name": "save_report", "args": {"filename": "draft.md", "content": "# Draft"}, "id": "save-1"},
+        tool=SimpleNamespace(name="save_report"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    middleware.wrap_tool_call(
+        request,
+        lambda req: ToolMessage(tool_call_id="save-1", name="save_report", content="Report saved to C:/tmp/report.md"),
+    )
+
+    assert thread_id not in _RUN_LIMITS
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -102,11 +276,11 @@ def _stream_supervisor_collect(payload, config: dict) -> tuple[list[ToolCall], l
     return tool_calls, interrupts, "\n".join(final_texts).strip()
 
 
-# ── Test 1: Planner → knowledge_search ───────────────────────────────────────
+# ── Test 1: Planner returns a plan without retrieval ─────────────────────────
 
 
-def test_tool_correctness_planner_uses_knowledge_search() -> None:
-    """Planner should call `knowledge_search` when handling a course-specific RAG query."""
+def test_tool_correctness_planner_returns_plan_without_tools() -> None:
+    """Planner should produce a plan directly and leave retrieval to the Researcher."""
     request = "Explain naive RAG, sentence-window retrieval, and parent-child chunking from the course knowledge base"
 
     debug_print(f"\n[test_tools] Test 1 — Planner tool correctness")
@@ -131,14 +305,8 @@ def test_tool_correctness_planner_uses_knowledge_search() -> None:
     if not final_output:
         final_output = str(result.get("structured_response", "plan produced"))
 
-    test_case = LLMTestCase(
-        input=request,
-        actual_output=final_output,
-        tools_called=tools_called,
-        expected_tools=[ToolCall(name="knowledge_search")],
-    )
-
-    deepeval.assert_test(test_case, [TOOL_METRIC])
+    assert not tools_called, f"Planner should not call retrieval tools, but called: {tool_names_called}"
+    assert final_output or result.get("structured_response")
 
 
 # ── Test 2: Researcher → at least one search tool ────────────────────────────
@@ -260,3 +428,231 @@ def test_tool_correctness_supervisor_calls_save_report() -> None:
     )
 
     deepeval.assert_test(test_case, [TOOL_METRIC])
+
+
+# ── Test: concurrent thread isolation ────────────────────────────────────────
+
+
+def test_concurrent_thread_ids_do_not_share_state() -> None:
+    """Two OS threads using different thread_ids must never contaminate each other's counters.
+
+    This validates the threading fix: each thread_id has its own RLock and its own
+    counter dict in _RUN_LIMITS. Mutations on thread A must be invisible on thread B.
+    """
+    thread_id_a = f"isolation-a-{uuid4().hex[:8]}"
+    thread_id_b = f"isolation-b-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+
+    errors: list[str] = []
+
+    def run_thread_a():
+        _RUN_LIMITS[thread_id_a] = {
+            "research_calls": 0, "revise_cycles": 0, "limit_reached": False,
+            "awaiting_save": False, "force_research": False,
+            "last_critique_payload": None, "last_findings": None,
+            "last_plan": None, "last_reviewer_feedback": None,
+            "original_request": "Thread A request",
+        }
+        req = SimpleNamespace(
+            tool_call={"name": "research", "args": {"plan": "thread A plan"}, "id": "ra-1"},
+            tool=SimpleNamespace(name="research"),
+            runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id_a}}),
+        )
+        middleware.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(tool_call_id="ra-1", name="research", content="findings A"),
+        )
+        # After one research call, thread A's counter should be 1
+        if _RUN_LIMITS[thread_id_a]["research_calls"] != 1:
+            errors.append(
+                f"Thread A research_calls expected 1, got {_RUN_LIMITS[thread_id_a]['research_calls']}"
+            )
+
+    def run_thread_b():
+        _RUN_LIMITS[thread_id_b] = {
+            "research_calls": 0, "revise_cycles": 0, "limit_reached": False,
+            "awaiting_save": False, "force_research": False,
+            "last_critique_payload": None, "last_findings": None,
+            "last_plan": None, "last_reviewer_feedback": None,
+            "original_request": "Thread B request",
+        }
+        req = SimpleNamespace(
+            tool_call={"name": "research", "args": {"plan": "thread B plan"}, "id": "rb-1"},
+            tool=SimpleNamespace(name="research"),
+            runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id_b}}),
+        )
+        middleware.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(tool_call_id="rb-1", name="research", content="findings B"),
+        )
+        # Thread B's counter must be independent of thread A
+        if _RUN_LIMITS[thread_id_b]["research_calls"] != 1:
+            errors.append(
+                f"Thread B research_calls expected 1, got {_RUN_LIMITS[thread_id_b]['research_calls']}"
+            )
+
+    t_a = threading.Thread(target=run_thread_a)
+    t_b = threading.Thread(target=run_thread_b)
+    t_a.start()
+    t_b.start()
+    t_a.join()
+    t_b.join()
+
+    reset_supervisor_limits(thread_id_a)
+    reset_supervisor_limits(thread_id_b)
+
+    assert not errors, "\n".join(errors)
+    assert thread_id_a not in _RUN_LIMITS, "Thread A state was not cleaned up"
+    assert thread_id_b not in _RUN_LIMITS, "Thread B state was not cleaned up"
+
+    # Cross-contamination check: thread A's state should never appear under thread B's key
+    # (we check this after cleanup — both keys must be gone independently)
+
+
+# ── Test: HITL rejection does not save and blocks awaiting_save ──────────────
+
+
+def test_hitl_rejection_does_not_save_and_resets_awaiting_save() -> None:
+    """When a user rejects the save_report (type=reject via HITL), the file must NOT be saved
+    and awaiting_save must be reset so the pipeline does not auto-save on the next LLM call.
+
+    This tests the save_report tool directly (no real pipeline needed).
+    """
+    # Rejection path: feedback is provided as reviewer change request
+    result = save_report.invoke({
+        "filename": "test_rejection.md",
+        "content": "# Draft\n\nSome research content here.",
+        "feedback": "The answer is missing key details about agentic RAG. Please revise.",
+    })
+
+    lowered = result.lower()
+    assert "not saved" in lowered or "report not saved" in lowered, (
+        f"Expected save to be blocked when feedback is provided, got: {result!r}"
+    )
+    assert "revise" in lowered or "feedback" in lowered, (
+        f"Response should reference the feedback or revision, got: {result!r}"
+    )
+
+    # Middleware level: after a HITL rejection, awaiting_save must be cleared
+    thread_id = f"test-hitl-reject-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 1, "revise_cycles": 0, "limit_reached": False,
+        "awaiting_save": True, "force_research": False,
+        "last_critique_payload": None, "last_findings": "some findings",
+        "last_plan": None, "last_reviewer_feedback": None,
+        "original_request": "Tell me about RAG.",
+    }
+
+    req = SimpleNamespace(
+        tool_call={
+            "name": "save_report",
+            "args": {
+                "filename": "draft.md",
+                "content": "# Draft\n\nSome findings.",
+                "feedback": "Please add more detail about sentence-window retrieval.",
+            },
+            "id": "save-reject-1",
+        },
+        tool=SimpleNamespace(name="save_report"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    middleware.wrap_tool_call(
+        req,
+        lambda r: ToolMessage(
+            tool_call_id="save-reject-1",
+            name="save_report",
+            content="REPORT NOT SAVED.\nReviewer requested changes before saving.\nFeedback: Please add more detail.",
+        ),
+    )
+
+    counters = _RUN_LIMITS.get(thread_id, {})
+    assert not counters.get("awaiting_save"), (
+        "awaiting_save must be False after HITL rejection so Fix-B does not auto-save on next LLM call"
+    )
+    assert counters.get("force_research"), (
+        "force_research must be True after HITL rejection to trigger a revision cycle"
+    )
+
+    reset_supervisor_limits(thread_id)
+
+
+def test_empty_researcher_output_does_not_loop() -> None:
+    """When all search tools return empty results, the middleware must mark limit_reached=True
+    and awaiting_save=True so the supervisor is forced to save a best-effort draft
+    instead of retrying research indefinitely.
+
+    Uses unittest.mock to patch search tools — no real LLM call needed.
+    """
+    from unittest.mock import patch
+
+    thread_id = f"test-empty-research-{uuid4().hex[:8]}"
+    middleware = RevisionLimitMiddleware()
+
+    # Seed state: plan exists, research has NOT started yet
+    _RUN_LIMITS[thread_id] = {
+        "research_calls": 0,
+        "revise_cycles": 0,
+        "limit_reached": False,
+        "awaiting_save": False,
+        "force_research": False,
+        "last_critique_payload": None,
+        "last_findings": None,
+        "last_plan": "Research the topic of agentic RAG.",
+        "last_reviewer_feedback": None,
+        "original_request": "Explain agentic RAG.",
+    }
+
+    empty_response = ToolMessage(
+        tool_call_id="research-1",
+        name="research",
+        content="Research agent failed: no results found in knowledge base or web search.",
+    )
+
+    request = SimpleNamespace(
+        tool_call={
+            "name": "research",
+            "args": {"plan": "Research agentic RAG."},
+            "id": "research-1",
+        },
+        tool=SimpleNamespace(name="research"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    result = middleware.wrap_tool_call(request, lambda req: empty_response)
+
+    counters = _RUN_LIMITS.get(thread_id, {})
+
+    assert counters.get("limit_reached"), (
+        "limit_reached must be True when research agent reports failure, "
+        "to prevent the supervisor from retrying research in a loop"
+    )
+    assert counters.get("awaiting_save"), (
+        "awaiting_save must be True after research failure so Fix-B triggers "
+        "an automatic best-effort save on the next LLM call"
+    )
+    assert int(counters.get("research_calls", 0)) == 1, (
+        "research_calls must be incremented even on failure so the supervisor "
+        "knows at least one attempt was made"
+    )
+
+    # Simulate middleware blocking a second research attempt
+    request2 = SimpleNamespace(
+        tool_call={
+            "name": "research",
+            "args": {"plan": "Research agentic RAG again."},
+            "id": "research-2",
+        },
+        tool=SimpleNamespace(name="research"),
+        runtime=SimpleNamespace(config={"configurable": {"thread_id": thread_id}}),
+    )
+
+    blocked = middleware.wrap_tool_call(request2, lambda req: empty_response)
+    blocked_text = str(getattr(blocked, "content", "")).lower()
+
+    assert "blocked" in blocked_text or "⛔" in blocked_text or "do not call" in blocked_text, (
+        f"Second research call must be blocked after limit_reached=True, got: {blocked_text!r}"
+    )
+
+    reset_supervisor_limits(thread_id)
