@@ -8,9 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+
 import trafilatura
 from ddgs import DDGS
 from langchain_core.tools import tool
+from langfuse import observe
 
 from config import settings
 from retriever import get_retriever
@@ -42,10 +44,8 @@ def preview_text(value: str, limit: int = 160) -> str:
 AUTO_SAVE_NOTE_MARKERS = (
     "best-effort draft",
     "maximum revision limit",
-    "revision limit",
-    "ліміт",       # matches both ліміт (nominative) and ліміту (genitive)
+    "ліміт ревіз",
     "максимальн",
-    "збережено після",  # e.g. збережено після досягнення
 )
 
 
@@ -186,6 +186,7 @@ def _format_knowledge_results(results: list[dict]) -> str:
 
 
 @tool
+@observe(name="web_search_tool")
 def web_search(query: str) -> str:
     """Search the public web with DuckDuckGo for current information."""
     if not query or not isinstance(query, str):
@@ -211,6 +212,7 @@ def web_search(query: str) -> str:
 
 
 @tool
+@observe(name="read_url_tool")
 def read_url(url: str) -> str:
     """Read and extract the main text from a specific webpage."""
     if not url or not isinstance(url, str):
@@ -238,6 +240,7 @@ def read_url(url: str) -> str:
 
 
 @tool
+@observe(name="knowledge_search_tool")
 def knowledge_search(query: str) -> str:
     """Search the local RAG knowledge base built from the course materials."""
     if not query or not isinstance(query, str):
@@ -261,6 +264,7 @@ def knowledge_search(query: str) -> str:
 
 
 @tool
+@observe(name="save_report_tool")
 def save_report(filename: str, content: str, feedback: str = "") -> str:
     """Save the final markdown report to the output folder. This tool is HITL-gated."""
     feedback_text = str(feedback or "").strip()
@@ -273,9 +277,11 @@ def save_report(filename: str, content: str, feedback: str = "") -> str:
             content = f"> **Note:** {feedback_text}\n\n{content}"
         else:
             return (
+                "REPORT NOT SAVED.\n"
                 "Reviewer requested changes before saving.\n"
                 f"Feedback: {feedback_text}\n"
-                "Please revise the report and call save_report again with updated content."
+                "Do not tell the user the report was saved. Revise the draft using this feedback, "
+                "then call save_report again with updated content."
             )
 
     if not isinstance(content, str) or not content.strip():
