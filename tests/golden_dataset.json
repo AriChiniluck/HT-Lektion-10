@@ -1,32 +1,32 @@
 [
   {
     "input": "Compare naive RAG vs sentence-window retrieval",
-    "expected_output": "Naive RAG indexes documents as fixed-size chunks and retrieves the most similar ones via vector search. It is simple and fast but may miss context near chunk boundaries. Sentence-window retrieval improves context quality by returning a wider surrounding window of sentences around the best-matching chunk, providing richer input to the LLM. Sentence-window is preferred for complex or multi-hop questions; naive RAG suits simple, latency-sensitive lookups.",
+    "expected_output": "Naive RAG splits documents into fixed-size chunks, which can cut sentences mid-context and lose surrounding meaning. Sentence-window retrieval improves this by retrieving a small sentence match and then expanding the context window around it, providing richer context to the LLM with better coherence and higher answer quality.",
     "category": "happy_path"
   },
   {
     "input": "Explain how LangGraph orchestrates agent workflows",
-    "expected_output": "LangGraph orchestrates agent workflows using a graph structure where nodes represent agent steps (LLM calls, tool calls, conditional branches) and edges define the control flow between them. It maintains shared state across nodes, supports human-in-the-loop interrupts, conditional branching, and cyclic flows for iterative reasoning. It is used to build multi-agent pipelines such as Supervisor\u2192Planner\u2192Researcher\u2192Critic and integrates with LLMs, tools, and memory.",
+    "expected_output": "LangGraph orchestrates agent workflows as a graph where nodes represent individual steps (LLM calls, tool calls, or conditional branches) and edges define the execution flow between them. It supports sequential, parallel, and conditional routing. A shared state object is passed across nodes so agents can exchange information, maintain memory, and checkpoint progress. This enables multi-agent pipelines with human-in-the-loop interrupts and iterative reasoning loops.",
     "category": "happy_path"
   },
   {
     "input": "What are the main advantages of multi-agent systems over single-agent systems?",
-    "expected_output": "Multi-agent systems enable specialization (each agent focuses on one role), parallelism, and fault tolerance. They allow complex tasks to be decomposed across dedicated agents and scale better than a single overloaded agent. Systems are more resilient — the failure of one agent does not stop the whole pipeline — and can achieve higher accuracy through iterative improvement cycles where agents review and refine each other\u2019s outputs.",
+    "expected_output": "Multi-agent systems enable specialization (each agent focuses on one task), parallelism, and fault tolerance. They allow complex tasks to be decomposed into sub-tasks handled by dedicated agents (Planner, Researcher, Critic), improve accuracy through critique loops, and scale better than a single overloaded LLM prompt.",
     "category": "happy_path"
   },
   {
     "input": "Describe the role of the Critic agent in a research pipeline",
-    "expected_output": "The Critic agent evaluates research findings across three dimensions: freshness (is the information current?), completeness (are all plan aspects addressed?), and structure (is the content well-organised?). It returns a verdict — approving the findings or requesting revisions — and provides a list of specific, actionable improvement requests that guide the Researcher in the next iteration.",
+    "expected_output": "The Critic agent evaluates research findings for freshness, completeness, and structure. It returns a structured verdict (APPROVE or REVISE), lists strengths and gaps, and provides actionable revision_requests that guide the Researcher in improving the next iteration of findings.",
     "category": "happy_path"
   },
   {
     "input": "How does FAISS enable fast similarity search for RAG?",
-    "expected_output": "FAISS (Facebook AI Similarity Search) enables fast similarity search by building an index over dense vector embeddings and using approximate nearest-neighbor (ANN) algorithms, which are far faster than exhaustive brute-force search. For RAG, document chunks are embedded and stored in the FAISS index; at query time the query embedding is matched against the index to retrieve the top-k most semantically relevant chunks without scanning the entire corpus.",
+    "expected_output": "FAISS (Facebook AI Similarity Search) builds an index over dense vector embeddings to allow approximate nearest-neighbor search in sub-linear time. For RAG, document chunks are embedded and indexed; at query time, the query embedding is compared against the index to retrieve the top-k most relevant chunks without scanning the entire corpus.",
     "category": "happy_path"
   },
   {
     "input": "RAG",
-    "expected_output": "The system should ask for clarification on which aspect of RAG the user wants to explore, since the single-word query is highly ambiguous. Alternatively, it may briefly acknowledge the ambiguity and invite a more specific follow-up question.",
+    "expected_output": "The system should either ask for clarification or provide a broad overview of Retrieval-Augmented Generation, including its definition, core components (retriever + generator), and common use cases, since the query is highly ambiguous.",
     "category": "edge_case"
   },
   {
@@ -36,7 +36,7 @@
   },
   {
     "input": "Порівняй RAG і файн-тюнінг для виробничих систем 2026",
-    "expected_output": "Система має відповісти українською мовою. Відповідь має порівнювати RAG і файн-тюнінг за принаймні для виробничних систем сценаріями: переваги, недоліки, вартість використання кожного підходу залежно від типу задачі і ресурсів організації.",
+    "expected_output": "Система має відповісти українською мовою. RAG є кращим вибором для динамічних знань та швидкого оновлення даних; файн-тюнінг — для засвоєння постійних стилів, доменної лексики або прихованих знань. У виробничих системах 2026 р. часто використовують гібридний підхід.",
     "category": "edge_case"
   },
   {
